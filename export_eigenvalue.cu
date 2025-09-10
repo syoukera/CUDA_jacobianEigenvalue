@@ -108,9 +108,7 @@ static inline size_t idx4(int i, int j, int k, int s,
 
 // チャンネル名を定義
 static const vector<string> channelNames = {
-    "T","HE","AR","H2","O2","H","O","OH","HO2","H2O","H2O2","OHD-OH",
-    "N","NH3","NH2","NH","NNH","NO","N2O","HNO","HON","H2NO","HNOH",
-    "NH2OH","NO2","HONO","HNO2","NO3","HONO2","N2H2","H2NN","N2H4","wr_max"
+    "lambda_e"
 };
 
 vector<Real> read_coord(const string& fname, int n, int bd) {
@@ -214,8 +212,8 @@ int main() {
     const int nf  = 33;                            // y の種数（>=19 を想定）
 
     // 出力ウィンドウ（Fortran では 1 始まり。ここも 1 始まりで指定）
-    const Range XR{1, 2000}, YR{1, 550}, ZR{1, nz};
-    // const Range XR{1, 200}, YR{400, 550}, ZR{1, nz};
+    // const Range XR{1, 2000}, YR{1, 550}, ZR{1, nz};
+    const Range XR{1, 200}, YR{400, 550}, ZR{1, nz};
 
     // 読むステップ範囲（Fortran の step0:step2:step1 に相当）
     const int step0 = 900100, step1 = 900100, step2 = 1000; // 例：単一ステップ
@@ -391,178 +389,180 @@ int main() {
                 // sf[sfind(i,j,k,34)] = LY(1);  // N2
             }
         }
-    }
 
-    // ここで sf を使う（ファイル出力など）
-    cout << "sf size (elements) = " << sf.size() << "\n";
-    
-    const int Nsystem = NX * NY * NZ;
-    const double t = 0.0;
-    // const double pres = 101325.0;
+        // ここで sf を使う（ファイル出力など）
+        cout << "sf size (elements) = " << sf.size() << "\n";
+        
+        const int Nsystem = NX * NY * NZ;
+        const double t = 0.0;
+        // const double pres = 101325.0;
 
-    // prepare parameter for CUDA
-    const int threads = 256;
-    // const int threads = 1024;
-    const int blocks = (Nsystem + threads - 1) / threads;
-    const int stride = blocks * threads; // GRID_DIM
-    std::cout << "Nsystem = " << Nsystem << ", threads = " << threads << ", blocks = " << blocks << std::endl;
-    
-    // parameter for shared memory
-    int k_max = 3;
-    size_t shared_doubles_per_block = (size_t)(k_max + 1) * threads;
-    size_t shared_bytes = shared_doubles_per_block * sizeof(double);
-    
-    // p_hostを確保して，値を代入
-    double *p_host = (double*)malloc(stride * sizeof(double));
-    if (!p_host) {
-        fprintf(stderr, "Host memory allocation failed\n");
-        exit(1);
-    }
-    for (int n = 0; n < stride; ++n) {
-        if (n < Nsystem) {
-            // p_host[n] = pres;
-            p_host[n] = p_global[n];
-        } else {
-            p_host[n] = 0.0;
+        // prepare parameter for CUDA
+        const int threads = 256;
+        // const int threads = 1024;
+        const int blocks = (Nsystem + threads - 1) / threads;
+        const int stride = blocks * threads; // GRID_DIM
+        std::cout << "Nsystem = " << Nsystem << ", threads = " << threads << ", blocks = " << blocks << std::endl;
+        
+        // parameter for shared memory
+        int k_max = 3;
+        size_t shared_doubles_per_block = (size_t)(k_max + 1) * threads;
+        size_t shared_bytes = shared_doubles_per_block * sizeof(double);
+        
+        // p_hostを確保して，値を代入
+        double *p_host = (double*)malloc(stride * sizeof(double));
+        if (!p_host) {
+            fprintf(stderr, "Host memory allocation failed\n");
+            exit(1);
         }
-    }
-    // for (int n = 0; n < 16; ++n) { 
-    //     printf("T_ID=%d, pres=%g\n", n, p_host[n]);
-    // }
-
-    // y_hostをNsystem*NSPで確保し、各NSPごとにy_host_singleをコピー
-    double *y_host = (double*)malloc(stride * NSP * sizeof(double));
-    if (!y_host) {
-        fprintf(stderr, "Host memory allocation failed\n");
-        exit(1);
-    }
-    // sf (size: NX*NY*NZ*NSP) の値を y_host (size: stride*NSP) にコピー
-    // y_hostは [kk*stride + n] の順で、kk:化学種(0～NSP-1), n:空間点(0～Nsystem-1)
-    for (int kk = 0; kk < NSP; ++kk) {
         for (int n = 0; n < stride; ++n) {
             if (n < Nsystem) {
-                y_host[kk * stride + n] = sf[n + Nsystem * kk];
+                // p_host[n] = pres;
+                p_host[n] = p_global[n];
             } else {
-                y_host[kk * stride + n] = 0.0;
+                p_host[n] = 0.0;
             }
         }
-    }
-
-    double* jac_host = (double*)malloc(stride * NSP * NSP * sizeof(double));
-    if (!jac_host) {
-        fprintf(stderr, "Host memory allocation failed\n");
-        exit(1);
-    }
-    mechanism_memory *mech_host;  // host 側ポインタ（中身は device ポインタを保持するだけ）
-    mech_host = (mechanism_memory*)malloc(sizeof(mechanism_memory));
-
-    // デバイスメモリ確保
-    double *p_dev, *y_dev, *jac_dev;
-    mechanism_memory *mech_dev;   // device 側の mechanism_memory 構造体
-    
-    // 初期化（メモリ確保＋構造体コピー）
-    initialize_gpu_memory(stride, &mech_host, &mech_dev);
-    cudaErrorCheck(cudaMalloc((void**)&p_dev, stride * sizeof(double)));
-    cudaErrorCheck(cudaMalloc((void**)&y_dev, stride * NSP * sizeof(double)));
-    cudaErrorCheck(cudaMalloc((void**)&jac_dev, stride * NSP * NSP * sizeof(double)));
-    
-    // ホスト → デバイス 転送
-    cudaErrorCheck(cudaMemcpy(p_dev, p_host, stride * sizeof(double), cudaMemcpyHostToDevice));
-    cudaErrorCheck(cudaMemcpy(y_dev, y_host, stride * NSP * sizeof(double), cudaMemcpyHostToDevice));
-    cudaErrorCheck(cudaMemcpy(jac_dev, jac_host, stride * NSP * NSP * sizeof(double), cudaMemcpyHostToDevice));
-
-    // CUDAイベントによるカーネル実行時間計測
-    cudaEvent_t start, stop;
-    float milliseconds = 0.0f;
-    cudaErrorCheck(cudaEventCreate(&start));
-    cudaErrorCheck(cudaEventCreate(&stop));
-    cudaErrorCheck(cudaEventRecord(start));
-
-    // カーネル呼び出し
-    call_eval_jacob_multi<<<blocks, threads, shared_bytes>>>(t, p_dev, y_dev, jac_dev, mech_dev, Nsystem);
-
-    cudaErrorCheck(cudaEventRecord(stop));
-    cudaErrorCheck(cudaEventSynchronize(stop));
-    cudaErrorCheck(cudaEventElapsedTime(&milliseconds, start, stop));
-    printf("CUDA kernel execution time: %.3f ms\n", milliseconds);
-
-    cudaErrorCheck(cudaEventDestroy(start));
-    cudaErrorCheck(cudaEventDestroy(stop));
-
-    // デバイス → ホスト 転送
-    cudaErrorCheck(cudaMemcpy(jac_host, jac_dev, stride * NSP * NSP * sizeof(double), cudaMemcpyDeviceToHost));
-
-
-    // 固有値計算用の変数
-    double wr[NSP], wi[NSP];  // 実部と虚部
-    double vl[NSP * NSP];  // 左固有ベクトル（不要ならNULLでも可）
-    double vr[NSP * NSP];  // 右固有ベクトル（不要ならNULLでも可）
-    int lwork = 4 * NSP;  // 作業配列のサイズ
-    double work[4 * NSP];  // 作業配列
-    int info;
-    
-    char jobvl = 'N';  // 左固有ベクトルは計算しない
-    char jobvr = 'N';  // 右固有ベクトルは計算しない
-    int n = NSP;
-    int lda = NSP;
-    int ldvl = NSP;
-    int ldvr = NSP;
-   
-    // calculate eigenvalue for Nsystem
-    for (int sys = 0; sys < Nsystem; sys++) {
-        
-        // pick single jacobian
-        double jac_host_single[NSP*NSP] = {0.0};
-        for (int r = 0; r < NSP; r++) {
-            for (int c = 0; c < NSP; c++) {
-                jac_host_single[r*NSP + c] = jac_host[ (r*NSP+c)*stride + sys];
-            }
-        }
-
-        // // Debugging prints
-        // std::cout << "Jacobian matrix (diagonal elements):" << std::endl;
-        // for (int i = 0; i < NSP; i++) {
-        //     std::cout << jac_host_single[i + i*NSP] << " ";
+        // for (int n = 0; n < 16; ++n) { 
+        //     printf("T_ID=%d, pres=%g\n", n, p_host[n]);
         // }
-        // std::cout << std::endl;
 
-        // LAPACK の dgeev を呼び出し（ヤコビアンの固有値を計算）
-        dgeev_(&jobvl, &jobvr, &n, jac_host_single, &lda, wr, wi, vl, &ldvl, vr, &ldvr, work, &lwork, &info);
-        
-        if (info == 0) {
-            // wrの最大値を出力
-            double wr_max = wr[0];
-            for (int i = 1; i < NSP; i++) {
-                // printf("%e + %ei\n", wr[i], wi[i]);
-                if (wr[i] > wr_max) wr_max = wr[i];
-            }
-            // printf("wr max = %e\n", wr_max);
-            std::cout << sys << "-th maximum eigenvalue = " << wr_max << std::endl;
-
-            // sfのNSP番目の化学種にwr_maxを割り当てる
-            sf[sys + Nsystem * (NSP - 1)] = wr_max;
-
-        } else {
-            printf("固有値計算に失敗しました (info = %d)\n", info);
+        // y_hostをNsystem*NSPで確保し、各NSPごとにy_host_singleをコピー
+        double *y_host = (double*)malloc(stride * NSP * sizeof(double));
+        if (!y_host) {
+            fprintf(stderr, "Host memory allocation failed\n");
+            exit(1);
         }
+        // sf (size: NX*NY*NZ*NSP) の値を y_host (size: stride*NSP) にコピー
+        // y_hostは [kk*stride + n] の順で、kk:化学種(0～NSP-1), n:空間点(0～Nsystem-1)
+        for (int kk = 0; kk < NSP; ++kk) {
+            for (int n = 0; n < stride; ++n) {
+                if (n < Nsystem) {
+                    y_host[kk * stride + n] = sf[n + Nsystem * kk];
+                } else {
+                    y_host[kk * stride + n] = 0.0;
+                }
+            }
+        }
+
+        double* jac_host = (double*)malloc(stride * NSP * NSP * sizeof(double));
+        if (!jac_host) {
+            fprintf(stderr, "Host memory allocation failed\n");
+            exit(1);
+        }
+        mechanism_memory *mech_host;  // host 側ポインタ（中身は device ポインタを保持するだけ）
+        mech_host = (mechanism_memory*)malloc(sizeof(mechanism_memory));
+
+        // デバイスメモリ確保
+        double *p_dev, *y_dev, *jac_dev;
+        mechanism_memory *mech_dev;   // device 側の mechanism_memory 構造体
+        
+        // 初期化（メモリ確保＋構造体コピー）
+        initialize_gpu_memory(stride, &mech_host, &mech_dev);
+        cudaErrorCheck(cudaMalloc((void**)&p_dev, stride * sizeof(double)));
+        cudaErrorCheck(cudaMalloc((void**)&y_dev, stride * NSP * sizeof(double)));
+        cudaErrorCheck(cudaMalloc((void**)&jac_dev, stride * NSP * NSP * sizeof(double)));
+        
+        // ホスト → デバイス 転送
+        cudaErrorCheck(cudaMemcpy(p_dev, p_host, stride * sizeof(double), cudaMemcpyHostToDevice));
+        cudaErrorCheck(cudaMemcpy(y_dev, y_host, stride * NSP * sizeof(double), cudaMemcpyHostToDevice));
+        cudaErrorCheck(cudaMemcpy(jac_dev, jac_host, stride * NSP * NSP * sizeof(double), cudaMemcpyHostToDevice));
+
+        // CUDAイベントによるカーネル実行時間計測
+        cudaEvent_t start, stop;
+        float milliseconds = 0.0f;
+        cudaErrorCheck(cudaEventCreate(&start));
+        cudaErrorCheck(cudaEventCreate(&stop));
+        cudaErrorCheck(cudaEventRecord(start));
+
+        // カーネル呼び出し
+        call_eval_jacob_multi<<<blocks, threads, shared_bytes>>>(t, p_dev, y_dev, jac_dev, mech_dev, Nsystem);
+
+        cudaErrorCheck(cudaEventRecord(stop));
+        cudaErrorCheck(cudaEventSynchronize(stop));
+        cudaErrorCheck(cudaEventElapsedTime(&milliseconds, start, stop));
+        printf("CUDA kernel execution time: %.3f ms\n", milliseconds);
+
+        cudaErrorCheck(cudaEventDestroy(start));
+        cudaErrorCheck(cudaEventDestroy(stop));
+
+        // デバイス → ホスト 転送
+        cudaErrorCheck(cudaMemcpy(jac_host, jac_dev, stride * NSP * NSP * sizeof(double), cudaMemcpyDeviceToHost));
+
+
+        // 固有値計算用の変数
+        double wr[NSP], wi[NSP];  // 実部と虚部
+        double vl[NSP * NSP];  // 左固有ベクトル（不要ならNULLでも可）
+        double vr[NSP * NSP];  // 右固有ベクトル（不要ならNULLでも可）
+        int lwork = 4 * NSP;  // 作業配列のサイズ
+        double work[4 * NSP];  // 作業配列
+        int info;
+        
+        char jobvl = 'N';  // 左固有ベクトルは計算しない
+        char jobvr = 'N';  // 右固有ベクトルは計算しない
+        int n = NSP;
+        int lda = NSP;
+        int ldvl = NSP;
+        int ldvr = NSP;
+    
+        vector<Real> eigvals(size_t(Nsystem), Real(0));
+
+        // calculate eigenvalue for Nsystem
+        for (int sys = 0; sys < Nsystem; sys++) {
+            
+            // pick single jacobian
+            double jac_host_single[NSP*NSP] = {0.0};
+            for (int r = 0; r < NSP; r++) {
+                for (int c = 0; c < NSP; c++) {
+                    jac_host_single[r*NSP + c] = jac_host[ (r*NSP+c)*stride + sys];
+                }
+            }
+
+            // // Debugging prints
+            // std::cout << "Jacobian matrix (diagonal elements):" << std::endl;
+            // for (int i = 0; i < NSP; i++) {
+            //     std::cout << jac_host_single[i + i*NSP] << " ";
+            // }
+            // std::cout << std::endl;
+
+            // LAPACK の dgeev を呼び出し（ヤコビアンの固有値を計算）
+            dgeev_(&jobvl, &jobvr, &n, jac_host_single, &lda, wr, wi, vl, &ldvl, vr, &ldvr, work, &lwork, &info);
+            
+            if (info == 0) {
+                // wrの最大値を出力
+                double wr_max = wr[0];
+                for (int i = 1; i < NSP; i++) {
+                    // printf("%e + %ei\n", wr[i], wi[i]);
+                    if (wr[i] > wr_max) wr_max = wr[i];
+                }
+                // printf("wr max = %e\n", wr_max);
+                // std::cout << sys << "-th maximum eigenvalue = " << wr_max << std::endl;
+
+                // sfのNSP番目の化学種にwr_maxを割り当てる
+                eigvals[sys] = wr_max;
+
+            } else {
+                printf("固有値計算に失敗しました (info = %d)\n", info);
+            }
+        }
+        
+        string outname = "output_step_" + filenumber + ".vts";
+        write_vts(outname, eigvals, NX, NY, NZ, x0, y0, z0, xg, yg, zg, 1);
+        cerr << "Wrote " << outname << "\n";
+        
+        // GPUメモリ解放
+        free_gpu_memory(&mech_host, &mech_dev);
+        cudaErrorCheck(cudaFree(y_dev));
+        cudaErrorCheck(cudaFree(p_dev));
+        cudaErrorCheck(cudaFree(jac_dev));
+
+        // CPUメモリ解放
+        free(y_host);
+        free(p_host);
+        free(jac_host);
+        free(mech_host);
     }
     
-    string outname = "output.vts";
-    write_vts(outname, sf, NX, NY, NZ, x0, y0, z0, xg, yg, zg, NSP);
-    cerr << "Wrote " << outname << "\n";
-
-    // GPUメモリ解放
-    free_gpu_memory(&mech_host, &mech_dev);
-    cudaErrorCheck(cudaFree(y_dev));
-    cudaErrorCheck(cudaFree(p_dev));
-    cudaErrorCheck(cudaFree(jac_dev));
-
-    // CPUメモリ解放
-    free(y_host);
-    free(p_host);
-    free(jac_host);
-    free(mech_host);
-
     return 0;
 }
 
