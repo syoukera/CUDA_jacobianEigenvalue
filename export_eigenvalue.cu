@@ -191,15 +191,16 @@ extern "C" {
 }
 
 __global__ void call_eval_jacob_multi(
-    double t, double pres,
-    const double *y_all,   // [Nsystem][NSP]
+    double t,
+    const double *p_all,   // [Nsystem][NSP]
+    const double *y_all,   // [Nsystem]
     double *jac_all,       // [Nsystem][NSP*NSP]
     mechanism_memory *mech_dev, int Nsystem)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= Nsystem) return;
 
-    eval_jacob(t, pres, y_all, jac_all, mech_dev);
+    eval_jacob(t, p_all, y_all, jac_all, mech_dev);
 }
 
 int main() {
@@ -399,6 +400,24 @@ int main() {
     int k_max = 3;
     size_t shared_doubles_per_block = (size_t)(k_max + 1) * threads;
     size_t shared_bytes = shared_doubles_per_block * sizeof(double);
+    
+    // p_hostを確保して，値を代入
+    double *p_host = (double*)malloc(stride * sizeof(double));
+    if (!p_host) {
+        fprintf(stderr, "Host memory allocation failed\n");
+        exit(1);
+    }
+    for (int n = 0; n < stride; ++n) {
+        if (n < Nsystem) {
+            p_host[n] = pres;
+            // p_host[n] = p_global[n];
+        } else {
+            p_host[n] = 0.0;
+        }
+    }
+    // for (int n = 0; n < 16; ++n) { 
+    //     printf("T_ID=%d, pres=%g\n", n, p_host[n]);
+    // }
 
     // y_hostをNsystem*NSPで確保し、各NSPごとにy_host_singleをコピー
     double *y_host = (double*)malloc(stride * NSP * sizeof(double));
@@ -406,8 +425,6 @@ int main() {
         fprintf(stderr, "Host memory allocation failed\n");
         exit(1);
     }
-
-    // ホストメモリ確保
     // sf (size: NX*NY*NZ*NSP) の値を y_host (size: stride*NSP) にコピー
     // y_hostは [kk*stride + n] の順で、kk:化学種(0～NSP-1), n:空間点(0～Nsystem-1)
     for (int kk = 0; kk < NSP; ++kk) {
@@ -419,6 +436,7 @@ int main() {
             }
         }
     }
+
     double* jac_host = (double*)malloc(stride * NSP * NSP * sizeof(double));
     if (!jac_host) {
         fprintf(stderr, "Host memory allocation failed\n");
@@ -428,15 +446,17 @@ int main() {
     mech_host = (mechanism_memory*)malloc(sizeof(mechanism_memory));
 
     // デバイスメモリ確保
-    double *y_dev, *jac_dev;
+    double *p_dev, *y_dev, *jac_dev;
     mechanism_memory *mech_dev;   // device 側の mechanism_memory 構造体
     
     // 初期化（メモリ確保＋構造体コピー）
     initialize_gpu_memory(stride, &mech_host, &mech_dev);
+    cudaErrorCheck(cudaMalloc((void**)&p_dev, stride * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&y_dev, stride * NSP * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&jac_dev, stride * NSP * NSP * sizeof(double)));
     
     // ホスト → デバイス 転送
+    cudaErrorCheck(cudaMemcpy(p_dev, p_host, stride * sizeof(double), cudaMemcpyHostToDevice));
     cudaErrorCheck(cudaMemcpy(y_dev, y_host, stride * NSP * sizeof(double), cudaMemcpyHostToDevice));
     cudaErrorCheck(cudaMemcpy(jac_dev, jac_host, stride * NSP * NSP * sizeof(double), cudaMemcpyHostToDevice));
 
@@ -448,7 +468,7 @@ int main() {
     cudaErrorCheck(cudaEventRecord(start));
 
     // カーネル呼び出し
-    call_eval_jacob_multi<<<blocks, threads, shared_bytes>>>(t, pres, y_dev, jac_dev, mech_dev, Nsystem);
+    call_eval_jacob_multi<<<blocks, threads, shared_bytes>>>(t, p_dev, y_dev, jac_dev, mech_dev, Nsystem);
 
     cudaErrorCheck(cudaEventRecord(stop));
     cudaErrorCheck(cudaEventSynchronize(stop));
@@ -517,17 +537,19 @@ int main() {
     }
 
     
-    string outname = "output.vts";
-    write_vts(outname, sf, NX, NY, NZ, x0, y0, z0, xg, yg, zg, NSP);
-    cerr << "Wrote " << outname << "\n";
+    // string outname = "output.vts";
+    // write_vts(outname, sf, NX, NY, NZ, x0, y0, z0, xg, yg, zg, NSP);
+    // cerr << "Wrote " << outname << "\n";
 
     // GPUメモリ解放
     free_gpu_memory(&mech_host, &mech_dev);
     cudaErrorCheck(cudaFree(y_dev));
+    cudaErrorCheck(cudaFree(p_dev));
     cudaErrorCheck(cudaFree(jac_dev));
 
     // CPUメモリ解放
     free(y_host);
+    free(p_host);
     free(jac_host);
     free(mech_host);
 

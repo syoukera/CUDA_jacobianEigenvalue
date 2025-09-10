@@ -1,30 +1,11 @@
 #include "jacob.cuh"
 
-__device__ void eval_jacob (const double t, const double pres, const double * __restrict__ y, double * __restrict__ jac, const mechanism_memory * __restrict__ d_mem) {
-
-  // if (threadIdx.x==0 && blockIdx.x==0) printf("blockDim.x=%d gridDim.x=%d GRID_DIM=%d\n", blockDim.x, gridDim.x, blockDim.x*gridDim.x);
-  // if (T_ID < 16) printf("T_ID=%d\n", T_ID);
-
-  // int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  // if (idx >= Nsystem) return;
-  
-  // int maxIndex = NSP * stride;
-  // int i0 = INDEX(0);
-  // if (i0 < 0 || i0 >= maxIndex) {
-  //     printf("OOB: idx=%d stride=%d i0=%d max=%d\n", idx, stride, i0, maxIndex);
-  //     return;
-  // }
-
-  // if (threadIdx.x==0 && blockIdx.x==0) {
-  //   printf("y is \n");
-  //   for (int i = 0; i<NSP; i++) {
-  //     printf("%e ", y[INDEX(i)]);
-  //   }
-  // }
-  //   printf("\n");
+__device__ void eval_jacob (const double t, const double * __restrict__ p, const double * __restrict__ y, double * __restrict__ jac, const mechanism_memory * __restrict__ d_mem) {
 
   extern volatile __shared__ double shared_temp[];
   double T = y[INDEX(0)];
+  double pres = p[T_ID];
+  // if (T_ID < 16) printf("T_ID=%d, pres=%g\n", T_ID, pres);
 
   // average molecular weight
   double mw_avg;

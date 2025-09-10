@@ -8,7 +8,6 @@ find_package(VTK REQUIRED COMPONENTS
 )
 
 set(SOURCES
-    # main.cu
     chem_utils.cu
     dydt.cu
     gpu_memory.cu
