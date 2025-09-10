@@ -214,8 +214,8 @@ int main() {
     const int nf  = 33;                            // y の種数（>=19 を想定）
 
     // 出力ウィンドウ（Fortran では 1 始まり。ここも 1 始まりで指定）
-    // const Range XR{1, 2000}, YR{1, 550}, ZR{1, nz};
-    const Range XR{1, 200}, YR{400, 550}, ZR{1, nz};
+    const Range XR{1, 2000}, YR{1, 550}, ZR{1, nz};
+    // const Range XR{1, 200}, YR{400, 550}, ZR{1, nz};
 
     // 読むステップ範囲（Fortran の step0:step2:step1 に相当）
     const int step0 = 900100, step1 = 900100, step2 = 1000; // 例：単一ステップ
@@ -232,6 +232,7 @@ int main() {
     vector<Real> yg = read_coord("../../../yg.dat", ny, jbd);
     vector<Real> zg = read_coord("../../../zg.dat", nz, kbd);
 
+    vector<Real> p_global(size_t(NX) * NY * NZ, Real(0));
     vector<Real> sf(size_t(NX) * NY * NZ * NSP, Real(0));
 
     auto sfind = [&](int i, int j, int k, int c) -> size_t {
@@ -240,6 +241,14 @@ int main() {
         int ii = i - x0; int jj = j - y0; int kk = k - z0; int cc = c - 1;
         // i 最速, 次に j, 次に k, 最後に channel
         return size_t(ii) + size_t(NX) * ( size_t(jj) + size_t(NY) * ( size_t(kk) + size_t(NZ) * size_t(cc) ) );
+    };
+
+    auto pind = [&](int i, int j, int k) -> size_t {
+        // i,j,k は 1-based（グローバル座標）
+        // C++ 配列は 0-based に変換
+        int ii = i - x0; int jj = j - y0; int kk = k - z0;
+        // i 最速, 次に j, 次に k, 最後に channel
+        return size_t(ii) + size_t(NX) * ( size_t(jj) + size_t(NY) * size_t(kk) );
     };
 
     // ======= ステップループ =======
@@ -336,6 +345,8 @@ int main() {
                 // sf[sfind(i,j,k, 5)] = p[L3];
                 // sf[sfind(i,j,k, 6)] = t[L3];
                 // sf[sfind(i,j,k, 7)] = h[L3];
+                
+                p_global[pind(i,j,k)] = p[L3];
 
                 // 種（Fortran では 1 始まりの添字）
                 auto LY = [&](int s1based)->Real {
@@ -387,7 +398,7 @@ int main() {
     
     const int Nsystem = NX * NY * NZ;
     const double t = 0.0;
-    const double pres = 101325.0;
+    // const double pres = 101325.0;
 
     // prepare parameter for CUDA
     const int threads = 256;
@@ -409,8 +420,8 @@ int main() {
     }
     for (int n = 0; n < stride; ++n) {
         if (n < Nsystem) {
-            p_host[n] = pres;
-            // p_host[n] = p_global[n];
+            // p_host[n] = pres;
+            p_host[n] = p_global[n];
         } else {
             p_host[n] = 0.0;
         }
@@ -535,11 +546,10 @@ int main() {
             printf("固有値計算に失敗しました (info = %d)\n", info);
         }
     }
-
     
-    // string outname = "output.vts";
-    // write_vts(outname, sf, NX, NY, NZ, x0, y0, z0, xg, yg, zg, NSP);
-    // cerr << "Wrote " << outname << "\n";
+    string outname = "output.vts";
+    write_vts(outname, sf, NX, NY, NZ, x0, y0, z0, xg, yg, zg, NSP);
+    cerr << "Wrote " << outname << "\n";
 
     // GPUメモリ解放
     free_gpu_memory(&mech_host, &mech_dev);
