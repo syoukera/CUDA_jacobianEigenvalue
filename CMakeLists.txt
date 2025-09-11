@@ -1,12 +1,6 @@
 cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 project(export_eigenvalue LANGUAGES CXX CUDA)
 
-find_package(VTK REQUIRED COMPONENTS 
-    CommonCore
-    CommonDataModel
-    IOXML
-)
-
 set(SOURCES
     chem_utils.cu
     dydt.cu
@@ -40,7 +34,6 @@ target_include_directories(export_eigenvalue PRIVATE
 
 # --- VTKと数学ライブラリをリンク ---
 target_link_libraries(export_eigenvalue PRIVATE
-    ${VTK_LIBRARIES}
     lapack blas m
 )
 

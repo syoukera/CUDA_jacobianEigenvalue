@@ -1,12 +1,6 @@
 // mpi_merge_reader.cpp
 // C++17
 #include <bits/stdc++.h>
-#include <vtkSmartPointer.h>
-#include <vtkStructuredGrid.h>
-#include <vtkPoints.h>
-#include <vtkDoubleArray.h>
-#include <vtkXMLStructuredGridWriter.h>
-#include <vtkPointData.h> 
 #include <iostream>
 #include "jacob.cuh"
 #include "gpu_memory.cuh"
@@ -123,61 +117,124 @@ vector<Real> read_coord(const string& fname, int n, int bd) {
     return g;
 }
 
-void write_vts(const string& filename,
-               const vector<Real>& sf,
-               int NX, int NY, int NZ,
-               int x0, int y0, int z0,
-               const vector<Real>& xg,
-               const vector<Real>& yg,
-               const vector<Real>& zg,
-               int nch)
+// Base64エンコード
+static const char b64_table[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+std::string base64_encode(const unsigned char* data, size_t len) {
+    std::string out;
+    out.reserve((len + 2) / 3 * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t v = data[i] << 16;
+        if (i + 1 < len) v |= data[i+1] << 8;
+        if (i + 2 < len) v |= data[i+2];
+        out.push_back(b64_table[(v >> 18) & 0x3F]);
+        out.push_back(b64_table[(v >> 12) & 0x3F]);
+        if (i + 1 < len) out.push_back(b64_table[(v >> 6) & 0x3F]);
+        else out.push_back('=');
+        if (i + 2 < len) out.push_back(b64_table[v & 0x3F]);
+        else out.push_back('=');
+    }
+    return out;
+}
+
+void write_vts_binary(const string& filename,
+                      const vector<Real>& sf,
+                      int NX, int NY, int NZ,
+                      int x0, int y0, int z0,
+                      const vector<Real>& xg,
+                      const vector<Real>& yg,
+                      const vector<Real>& zg,
+                      int nch)
 {
-    // StructuredGrid を作成
-    auto grid = vtkSmartPointer<vtkStructuredGrid>::New();
-    grid->SetDimensions(NX, NY, NZ);
+    std::ofstream ofs(filename);
+    if (!ofs) {
+        std::cerr << "Failed to open file: " << filename << "\n";
+        return;
+    }
 
-    // 座標点を登録
-    auto pts = vtkSmartPointer<vtkPoints>::New();
-    pts->SetDataTypeToDouble();
-    pts->SetNumberOfPoints(NX * NY * NZ);
+    ofs << R"(<?xml version="1.0"?>)" << "\n";
+    ofs << R"(<VTKFile type="StructuredGrid" version="0.1" byte_order="LittleEndian">)" << "\n";
 
-    size_t idx = 0;
-    for (int k = 0; k < NZ; ++k) {
-        for (int j = 0; j < NY; ++j) {
-            for (int i = 0; i < NX; ++i) {
-                double xx = xg[x0-1 + i]; // 1-based→0-based
-                double yy = yg[y0-1 + j];
-                double zz = zg[z0-1 + k];
-                pts->SetPoint(idx++, xx, yy, zz);
+    ofs << "  <StructuredGrid WholeExtent=\""
+        << "0 " << NX-1 << " "
+        << "0 " << NY-1 << " "
+        << "0 " << NZ-1 << "\">\n";
+
+    ofs << "    <Piece Extent=\""
+        << "0 " << NX-1 << " "
+        << "0 " << NY-1 << " "
+        << "0 " << NZ-1 << "\">\n";
+
+    // --- 座標 ---
+    ofs << "      <Points>\n";
+    ofs << "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"binary\">\n";
+
+    {
+        size_t npts = NX * NY * NZ;
+        vector<double> coords(3 * npts);
+
+        size_t idx = 0;
+        for (int k = 0; k < NZ; ++k) {
+            for (int j = 0; j < NY; ++j) {
+                for (int i = 0; i < NX; ++i) {
+                    coords[idx++] = xg[x0-1 + i];
+                    coords[idx++] = yg[y0-1 + j];
+                    coords[idx++] = zg[z0-1 + k];
+                }
             }
         }
-    }
-    grid->SetPoints(pts);
 
-    // 各チャンネルを PointData として追加
+        // バイト数を先頭に付加
+        uint32_t nbytes = static_cast<uint32_t>(coords.size() * sizeof(double));
+        std::ostringstream raw;
+        raw.write(reinterpret_cast<const char*>(&nbytes), sizeof(uint32_t));
+        raw.write(reinterpret_cast<const char*>(coords.data()), nbytes);
+
+        std::string encoded = base64_encode(
+            reinterpret_cast<const unsigned char*>(raw.str().data()),
+            raw.str().size());
+
+        ofs << encoded << "\n";
+    }
+
+    ofs << "        </DataArray>\n";
+    ofs << "      </Points>\n";
+
+    // --- スカラー値 ---
+    ofs << "      <PointData>\n";
+    size_t npts = NX * NY * NZ;
     for (int c = 0; c < nch; ++c) {
-        auto arr = vtkSmartPointer<vtkDoubleArray>::New();
-        string name = (c < (int)channelNames.size()) ? channelNames[c] : ("var"+to_string(c+1));
-        arr->SetName(name.c_str());
-        arr->SetNumberOfComponents(1);
-        arr->SetNumberOfTuples(NX * NY * NZ);
+        string name = (c < (int)channelNames.size()) ? channelNames[c] : ("var" + std::to_string(c+1));
 
-        size_t npts = NX*NY*NZ;
+        ofs << "        <DataArray type=\"Float64\" Name=\"" << name
+            << "\" NumberOfComponents=\"1\" format=\"binary\">\n";
+
+        vector<double> vals(npts);
         for (size_t n = 0; n < npts; ++n) {
-            // sf は i最速, j, k, channel最遅
-            size_t idx = n + size_t(NX*NY*NZ) * size_t(c);
-            arr->SetValue(n, sf[idx]);
+            size_t idx = n + size_t(npts) * size_t(c);
+            vals[n] = sf[idx];
         }
-        grid->GetPointData()->AddArray(arr);
-    }
 
-    // 書き出し
-    auto writer = vtkSmartPointer<vtkXMLStructuredGridWriter>::New();
-    writer->SetFileName(filename.c_str());
-    writer->SetInputData(grid);
-    writer->SetDataModeToBinary(); // バイナリ出力
-    writer->Write();
+        uint32_t nbytes = static_cast<uint32_t>(vals.size() * sizeof(double));
+        std::ostringstream raw;
+        raw.write(reinterpret_cast<const char*>(&nbytes), sizeof(uint32_t));
+        raw.write(reinterpret_cast<const char*>(vals.data()), nbytes);
+
+        std::string encoded = base64_encode(
+            reinterpret_cast<const unsigned char*>(raw.str().data()),
+            raw.str().size());
+
+        ofs << encoded << "\n";
+        ofs << "        </DataArray>\n";
+    }
+    ofs << "      </PointData>\n";
+
+    ofs << "    </Piece>\n";
+    ofs << "  </StructuredGrid>\n";
+    ofs << "</VTKFile>\n";
 }
+
 
 extern "C" {
     void dgeev_(char* jobvl, char* jobvr, int* n,
@@ -547,7 +604,7 @@ int main() {
         }
         
         string outname = "output_step_" + filenumber + ".vts";
-        write_vts(outname, eigvals, NX, NY, NZ, x0, y0, z0, xg, yg, zg, 1);
+        write_vts_binary(outname, eigvals, NX, NY, NZ, x0, y0, z0, xg, yg, zg, 1);
         cerr << "Wrote " << outname << "\n";
         
         // GPUメモリ解放
