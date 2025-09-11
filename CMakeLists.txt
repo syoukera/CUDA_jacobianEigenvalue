@@ -29,7 +29,7 @@ add_executable(export_eigenvalue ${SOURCES})
 target_include_directories(export_eigenvalue PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/jacobs
-    /home/syoukera/github/cuda-samples/Common
+    ${CMAKE_CURRENT_SOURCE_DIR}/cuda-samples/Common
 )
 
 # --- 数学ライブラリをリンク ---
