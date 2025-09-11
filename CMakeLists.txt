@@ -32,7 +32,7 @@ target_include_directories(export_eigenvalue PRIVATE
     /home/syoukera/github/cuda-samples/Common
 )
 
-# --- VTKと数学ライブラリをリンク ---
+# --- 数学ライブラリをリンク ---
 target_link_libraries(export_eigenvalue PRIVATE
     lapack blas m
 )
